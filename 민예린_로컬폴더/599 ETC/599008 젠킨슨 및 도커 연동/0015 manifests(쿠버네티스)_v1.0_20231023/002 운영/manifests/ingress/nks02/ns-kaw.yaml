@@ -1,0 +1,47 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: kaw-alb-ingress
+  namespace: ns-kaw
+  annotations:
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/description: oc-prd-nks02-kaw ingress controller
+    alb.ingress.kubernetes.io/load-balancer-size: large
+  labels:
+    app: kaw-alb-ingress
+spec:
+  backend:
+    serviceName: oc-front-service
+    servicePort: 10080
+  rules:
+    - http:
+        paths:
+          - path: /common/*
+            backend:
+              serviceName: oc-common-service
+              servicePort: 28080
+          - path: /cls/*
+            backend:
+              serviceName: oc-cls-service
+              servicePort: 38080
+          - path: /lecture/*
+            backend:
+              serviceName: oc-lecture-service
+              servicePort: 48080
+          - path: /chat/*
+            backend:
+              serviceName: node-chat-service
+              servicePort: 18081
+          - path: /websocket/*
+            backend:
+              serviceName: node-chat-service
+              servicePort: 18081
+          - path: /ext/*
+            backend:
+              serviceName: oc-ext-service
+              servicePort: 48081    
+          - path: /*
+            backend:
+              serviceName: oc-front-service
+              servicePort: 10080

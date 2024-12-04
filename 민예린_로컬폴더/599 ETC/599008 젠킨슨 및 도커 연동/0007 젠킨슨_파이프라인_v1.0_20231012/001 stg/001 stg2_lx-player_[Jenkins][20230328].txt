@@ -1,0 +1,66 @@
+--------------------------------------------
+옵션
+체크 - 이빌드는 매개변수가 있습니다. 
+String Parameter
+> 매개변수명 : BRANCH_NAME
+> Default value develop
+> 설명없음
+
+pipeline
+> Definition: pipeline script
+> Script
+> 체크: use groovy sandbox
+
+--------------------------------------------
+
+node{
+    def imageName
+    def nks01 = params.NKS01
+    def nks02 = params.NKS02
+
+    stage('checkout'){
+        checkout([$class: 'GitSCM', branches: [[name: "*/$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/ui-develop/lx-player.git']]])
+        }
+    stage('Initialize') {
+        imageName = 'lx-player-$BUILD_NUMBER:release'
+        echo imageName
+    }
+    stage('build') {
+        parallel(
+            "Docker ImagePush": {
+                withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                    s3Download(file: 'lx-player.Dockerfile', bucket: 'ebs-oc-stg-contents-bucket', path: 'dockerfiles/lx-player.Dockerfile', force:true)
+                    s3Download(file: 'lx-player-k8s.yaml', bucket: 'ebs-oc-stg-contents-bucket', path: 'manifests/v2/lx-player-k8s.yaml', force:true)
+                    s3Download(file: 'nginx-player.conf', bucket: 'ebs-oc-stg-contents-bucket', path: "nginxconf/ns-auth/nginx-player.conf", force:true)
+                }
+                sh "docker image build -f lx-player.Dockerfile  -t lx-player-$BUILD_NUMBER ."
+                sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA e89969vf.kr.private-ncr.ntruss.com '
+                sh "docker tag lx-player-$BUILD_NUMBER e89969vf.kr.private-ncr.ntruss.com/" + imageName
+                sh 'docker push e89969vf.kr.private-ncr.ntruss.com/' + imageName
+                //}
+            }
+        )
+    }
+    
+    def script = "; envsubst < lx-player-k8s.yaml > deployment.yaml"
+    
+    stage('kube-nks01') {
+      sh 'export NODE_NAME=oc-stg-nks01-np NAMESPACE=ns-auth APP_NAME=lx-player IMAGE=e89969vf.kr.private-ncr.ntruss.com/' + imageName + ' ' + script
+      withKubeConfig([credentialsId: 'stg-nks01-kube', 
+            serverUrl: 'https://db8b230a-5ab0-446e-b542-cfaa2dc50b87.kr.vnks.ntruss.com',
+            namespace: 'ns-auth'
+            ]) {
+        sh "kubectl apply -f deployment.yaml --namespace ns-auth "
+      }  
+    }
+    
+    stage('kube-nks02') {
+      sh 'export NODE_NAME=oc-stg-nks02-np NAMESPACE=ns-auth APP_NAME=lx-player IMAGE=e89969vf.kr.private-ncr.ntruss.com/' + imageName + ' ' + script
+      withKubeConfig([credentialsId: 'stg-nks02-kube',
+            serverUrl: 'https://ee835c78-d050-41ef-8a97-bf98094ee59e.kr.vnks.ntruss.com',
+            namespace: 'ns-auth'
+            ]) {
+        sh "kubectl apply -f deployment.yaml --namespace ns-auth "
+      }
+    }
+}

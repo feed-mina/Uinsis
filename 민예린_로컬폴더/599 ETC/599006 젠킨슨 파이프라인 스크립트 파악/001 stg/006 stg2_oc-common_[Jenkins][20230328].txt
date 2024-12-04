@@ -1,0 +1,131 @@
+--------------------------------------------
+옵션
+체크 - 오래된 빌드 삭제
+Strategy - Log Rotation
+빌드 이력유지기간(일): 공란
+보관할 최대갯수: 3
+ 
+String Parameter
+> 매개변수명 : BRANCH_NAME
+> Default value develop
+> 설명없음
+
+pipeline
+> Definition: pipeline script
+> Script
+> 체크: use groovy sandbox
+
+--------------------------------------------
+
+
+node{
+    def mvnHome
+    def artifactId
+    def version
+    def jar
+    def imageName
+    def i = 0
+    def ns
+    def node
+    def kube
+    def kubeUrl
+    def bfrSize
+    def aftSize = 0
+    def iter = 0
+    def ns_name = ['ns-inc1','ns-inc2','ns-taj','ns-pus']
+    //def ns_name = ['ns-edu01','ns-edu02','ns-edu03','ns-edu04']
+
+    stage('checkout'){
+        checkout([$class: 'GitSCM', branches: [[name: "*/$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/codesholic/oc-common.git']]])
+    }
+    
+    stage('Initialize') {
+      mvnHome = tool 'M3'
+      echo imageName
+    }
+    stage('build') {
+      sh "'${mvnHome}/bin/mvn' -DskipTests clean package -DfinalName=oc-cls"
+    }
+    stage('archieve') {
+      parallel(
+          "Archive Artifacts" : {
+              archiveArtifacts artifacts: '**/target/common-0.0.1-SNAPSHOT.jar',
+              fingerprint: true
+          },
+          "Contents": {
+              sh 'mv target/common-0.0.1-SNAPSHOT.jar ./common-0.0.1-SNAPSHOT.jar'
+              withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                  s3Download(file: 'whatap.agent-2.0_29.jar', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/whatap.agent-2.0_29.jar', force:true)
+                  s3Download(file: 'whatap.agent-2.1.1.jar', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/whatap.agent-2.1.1.jar', force:true)
+                  s3Download(file: 'paramkey.txt', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/paramkey.txt', force:true)
+                  s3Download(file: 'CustomPool.x', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/CustomPool.x', force:true)
+                  s3Download(file: 'oc-common.yml', bucket: 'ebs-oc-stg-contents-bucket', path: 'configfiles/oc-common.yml', force:true)
+                  s3Download(file: 'oc-common.Dockerfile', bucket: 'ebs-oc-stg-contents-bucket', path: 'dockerfiles/oc-common.Dockerfile', force:true)
+                  s3Download(file: 'oc-common-k8s.yaml', bucket: 'ebs-oc-stg-contents-bucket', path: 'manifests/v2/oc-common-k8s.yaml', force:true)
+              }
+          }                      
+      )
+    }
+
+    ns_name.each() { edu ->
+        i = i+1
+											  
+    
+        ns = edu
+        //node = "edu0${i}"
+        imageName = "oc-common-edu0${i}-$BUILD_NUMBER:release"
+        configName = "oc-common.yml"
+        
+        stage('whatap '+ns) {
+          withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+            s3Download(file: 'whatap.conf', bucket: 'ebs-oc-stg-contents-bucket', path: "whatapfiles/v2/${ns}/whatap.conf", force:true)
+          }            
+        }
+
+        if(i<3) {
+		  node = "nks01-np"
+          kube = "stg-nks01-kube"
+          kubeUrl = "https://db8b230a-5ab0-446e-b542-cfaa2dc50b87.kr.vnks.ntruss.com"
+        } else {
+		  node = "nks02-np"
+          kube = "stg-nks02-kube"
+          kubeUrl = "https://ee835c78-d050-41ef-8a97-bf98094ee59e.kr.vnks.ntruss.com"            
+        }  
+
+        stage('Deploy '+ ns) {
+            
+          //docker build    
+          sh "docker image build -f oc-common.Dockerfile --build-arg SERVER_ENV=stg --build-arg NAMESPACE=${ns} --build-arg CONFIG_NAME=${configName}  -t oc-common-edu0${i}-$BUILD_NUMBER ."
+          sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA e89969vf.kr.private-ncr.ntruss.com '
+          sh "docker tag oc-common-edu0${i}-$BUILD_NUMBER e89969vf.kr.private-ncr.ntruss.com/" + imageName
+   
+          bfrSize = sh "docker image inspect oc-common-edu0${i}-$BUILD_NUMBER --format '{{.Size}}'"
+          aftSize = 0
+          iter = 0
+          while (bfrSize != aftSize) {
+              pushImage('docker push e89969vf.kr.private-ncr.ntruss.com/' + imageName, 0)
+                 aftSize = sh "docker image inspect e89969vf.kr.private-ncr.ntruss.com/$imageName --format '{{.Size}}'"
+                 if(iter++ > 10)
+                     break;
+          }
+
+        //   kubernetes apply
+          def script = "; envsubst < oc-common-k8s.yaml > deployment.yaml"
+          sh "export NAMESPACE=${ns} NODE_NAME=oc-stg-${node} APP_NAME=oc-common IMAGE=e89969vf.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+          withKubeConfig([credentialsId: "${kube}", serverUrl: "${kubeUrl}",])
+          {
+            sh "kubectl apply -f deployment.yaml "
+          }          
+        }
+            
+    }
+}
+
+void pushImage(exec, iter){
+    try {
+        sh exec
+    } catch (exception) {
+        if (iter < 10)
+            pushImage(exec, ++iter)
+    }
+}

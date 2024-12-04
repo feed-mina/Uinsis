@@ -1,0 +1,113 @@
+# SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}-service
+  namespace: ${NAMESPACE}
+spec:
+  type: NodePort
+  selector:
+    app: ${APP_NAME}
+  ports:
+  - name: http
+    protocol: TCP
+    port: 18081
+    targetPort: 8080
+
+---
+# DEPOLOYMENT
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+#  minReadySeconds: 20
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:                  
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: ${APP_NAME}
+  template:
+    metadata:
+      labels:
+        app: ${APP_NAME}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                - key: ncloud.com/nks-nodepool
+                  operator: In
+                  values:
+                    - ${NODE_NAME}    
+      containers:
+      - name: ${APP_NAME}
+        image: ${IMAGE}
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 8080
+        resources:
+          requests:
+            memory: "2Gi"
+            cpu: "1000m"
+          limits:
+            memory: "4Gi"
+            cpu: "2000m"
+        livenessProbe:
+          exec:
+            command: ["sh", "-c", "cd /"]
+          initialDelaySeconds: 30
+          periodSeconds: 30
+#          timeoutSeconds: 1 
+#          successThreshold: 1
+#          failureThreshold: 3
+#          httpGet:
+#            path: /
+#            port: 8080
+#          tcpSocket:
+#            port: 8080
+#          initialDelaySeconds: 5
+#          periodSeconds: 5
+#          successThreshold: 1                          
+        readinessProbe:
+          exec:
+            command: ["sh", "-c", "cd /"]
+          initialDelaySeconds: 30
+          periodSeconds: 15
+#          timeoutSeconds: 1      # 해당 시간 이내 반드시 응답
+#          successThreshold: 1    # probe가 명령 수행 후 성공이라고 판단하기 위한 최소 횟수
+#          failureThreshold: 3    # probe가 명령 수행 후 실패라고 판단하기 위한 최소 횟수, probe가 횟수 이상 실패하면 컨테이너 중지 후 재시작
+        lifecycle:
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep 20"]             
+      imagePullSecrets:
+      - name: regcred-${NAMESPACE}
+
+---
+# HPA(Horizonal Pod AutoScaler)     # Horizonal Pod AutoScaler 적용      
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ${APP_NAME}-hpa
+  namespace: ${NAMESPACE}
+spec:
+  maxReplicas: 5
+  minReplicas: 1
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment                  
+    name: ${APP_NAME}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      targetAverageUtilization: 70

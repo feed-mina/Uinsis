@@ -1,0 +1,129 @@
+--------------------------------------------
+옵션
+체크 - 오래된 빌드 삭제
+Strategy - Log Rotation
+빌드 이력유지기간(일): 공란
+보관할 최대갯수: 30
+ 
+String Parameter
+> 매개변수명 : BRANCH_NAME
+> Default value develop
+> 설명없음
+
+pipeline
+> Definition: pipeline script
+> Script
+> 체크: use groovy sandbox
+
+--------------------------------------------
+node{
+    def mvnHome
+    def artifactId
+    def version
+    def jar
+    def imageName
+    def i
+    def ns
+    def node
+    def kube
+    def kubeUrl
+    def bfrSize
+    def aftSize = 0
+    def iter = 0
+	
+	// 0501
+    stage('checkout'){
+        checkout([$class: 'GitSCM', branches: [[name: "$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/codesholic/oc-auth.git']]])
+    }
+    
+    // stage('checkout'){
+    //     checkout([$class: 'GitSCM', branches: [[name: "*/$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://git.ebsoc.co.kr/codesholic/oc-auth.git']]])
+    // }
+    
+    
+    stage('Initialize') {
+        mvnHome = tool 'M3'
+        //version = sh(script:'${mvnHome}/bin/mvn version', returnStdout: true).trim()
+        //echo version
+        //artifactId = sh(script:'mvn help:evaluate -Dexpression=project.artifactId -q', returnStdout: true).trim()
+        //version = sh(script:'mvn help:evaluate -Dexpression=project.version -q', returnStdout: true).trim()
+        //jar = artifactId + '-' + version + '.jar'
+        //echo jar
+    }
+    stage('build'){
+        sh "'${mvnHome}/bin/mvn' -DskipTests clean package -DfinalName=oc-auth"
+    }
+    stage('archieve') {
+        parallel(
+            "Archive Artifacts" : {
+                archiveArtifacts artifacts: '**/target/auth-0.0.1-SNAPSHOT.jar',
+                fingerprint: true
+            },
+            "Docker ImagePush": {
+                sh 'mv target/auth-0.0.1-SNAPSHOT.jar ./auth-0.0.1-SNAPSHOT.jar'
+                withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                    s3Download(file: 'whatap.agent-2.0_29.jar', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/whatap.agent-2.0_29.jar', force:true)
+                    s3Download(file: 'whatap.agent-2.1.1.jar', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/whatap.agent-2.1.1.jar', force:true)
+                    s3Download(file: 'paramkey.txt', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/paramkey.txt', force:true)
+                    s3Download(file: 'CustomPool.x', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/CustomPool.x', force:true)
+                    s3Download(file: 'oc-auth.Dockerfile', bucket: 'ebs-oc-stg-contents-bucket', path: 'dockerfiles/oc-auth.Dockerfile', force:true)
+                    s3Download(file: 'oc-auth-k8s.yaml', bucket: 'ebs-oc-stg-contents-bucket', path: 'manifests/v2/oc-auth-k8s.yaml', force:true)
+                    s3Download(file: 'oc-auth.yml', bucket: 'ebs-oc-stg-contents-bucket', path: 'configfiles/oc-auth.yml', force:true)
+                }
+            }
+        )
+    }
+    
+    for(i=1; i<3; i++) {
+        if (i<2) {
+            node = "nks01-np"
+            kube = "stg-nks01-kube"
+            kubeUrl = "https://db8b230a-5ab0-446e-b542-cfaa2dc50b87.kr.vnks.ntruss.com"
+        } else {
+            node = "nks02-np"
+            kube = "stg-nks02-kube"
+            kubeUrl = "https://ee835c78-d050-41ef-8a97-bf98094ee59e.kr.vnks.ntruss.com"
+        }
+
+        stage('whatap-auth'+i) {
+          imageName = "oc-auth${i}-edu0${i}-$BUILD_NUMBER:release"
+          withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+              s3Download(file: 'whatap.conf', bucket: 'ebs-oc-stg-contents-bucket', path: "whatapfiles/v2/ns-auth${i}/whatap.conf", force:true)
+          }
+          sh "docker image build -f oc-auth.Dockerfile --build-arg SERVER_ENV=stg -t oc-auth${i}-edu0${i}-$BUILD_NUMBER ."
+          sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA e89969vf.kr.private-ncr.ntruss.com'
+          sh "docker tag oc-auth${i}-edu0${i}-$BUILD_NUMBER e89969vf.kr.private-ncr.ntruss.com/" + imageName
+  
+          bfrSize = sh "docker image inspect oc-auth${i}-edu0${i}-$BUILD_NUMBER --format '{{.Size}}'"
+    	  aftSize = 0
+    	  iter = 0
+    	  while (bfrSize != aftSize) {
+    	      pushImage('docker push e89969vf.kr.private-ncr.ntruss.com/' + imageName, 0)
+              aftSize = sh "docker image inspect e89969vf.kr.private-ncr.ntruss.com/$imageName --format '{{.Size}}'"
+              if(iter++ > 10)
+                break;
+    	  }
+        }
+
+        stage('kube-auth'+i) {
+            def script = "; envsubst < oc-auth-k8s.yaml > deployment.yaml"
+            sh 'export NODE_NAME=oc-stg-' + node + ' NAMESPACE=ns-auth APP_NAME=oc-auth IMAGE=e89969vf.kr.private-ncr.ntruss.com/' + imageName + ' ' + script			
+            withKubeConfig([credentialsId: "${kube}", serverUrl: "${kubeUrl}", ])
+            {
+                sh "kubectl apply -f deployment.yaml --namespace ns-auth"
+            }
+        }
+    }
+}
+
+
+void pushImage(exec, iter){
+    try {
+        sh exec
+    } catch (exception) {
+        if (iter < 10)
+            pushImage(exec, ++iter)
+    }
+}
+
+

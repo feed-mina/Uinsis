@@ -1,0 +1,23 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    alb.ingress.kubernetes.io/description: oc-prd-nks01-lx-player ingress controller
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/load-balancer-size: large
+    kubernetes.io/ingress.class: alb
+  labels:
+    app: lx-player-alb-ingress
+  name: lx-player-alb-ingress
+  namespace: ns-auth
+spec:
+  backend:
+    serviceName: lx-player-service
+    servicePort: 10082
+  rules:
+  - http:
+      paths:
+      - backend:
+          serviceName: lx-player-service
+          servicePort: 10082
+        path: /*

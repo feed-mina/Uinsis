@@ -1,0 +1,194 @@
+------------------------
+체크 - 이 빌드는 매개변수가 있습니다.
+String parameter
+매개변수명: BRANCH_NAME
+Default Value: release
+
+pipeline
+definition: pipeline script
+script
+체크 - use groovy sandbox
+------------------------
+
+
+node{
+    def mvnHome
+    def artifactId
+    def version
+    def jar
+    def imageName
+    def i
+    def ns
+    def node
+    def kube
+    def kubeUrl
+
+    def nks1_ns = ['ns-sel1', 'ns-sel2', 'ns-sel3', 'ns-kyg1', 'ns-kyg2', 'ns-kyg3', 'ns-kyg4', 'ns-kyg5', 'ns-inc1', 'ns-inc2']
+    def nks1_node = ['nks01-npool', 'nks01-npool', 'nks01-npool', 'nks01-npool', 'nks01-npool', 'nks01-npool', 'nks01-npool', 'nks01-npool', 'nks01-npool', 'nks01-npool']
+    def nks2_ns = ['ns-taj', 'ns-pus', 'ns-tae', 'ns-kwj', 'ns-usn', 'ns-kaw', 'ns-ccb', 'ns-ccn', 'ns-clb', 'ns-cln', 'ns-ksb', 'ns-ksn', 'ns-chj', 'ns-sej', 'ns-frc']
+    def nks2_node = ['nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool', 'nks02-npool']
+    
+    stage('checkparam') {
+        if ("$BRANCH_NAME" == "master") {
+        } else {
+            echo "branch name must be 'master'"
+            exit
+        }
+    }
+    
+    stage('checkout'){
+        checkout([$class: 'GitSCM', branches: [[name: "*/$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/codesholic/oc-lecture.git']]])
+    }
+    
+    stage('Initialize') {
+      mvnHome = tool 'M3'
+    }
+    stage('build') {
+      sh "'${mvnHome}/bin/mvn' -DskipTests clean package -DfinalName=oc-lecture"
+    }
+    stage('archieve') {
+      parallel(
+          "Archive Artifacts" : {
+              archiveArtifacts artifacts: '**/target/lecture-0.0.1-SNAPSHOT.jar',
+              fingerprint: true
+          },
+          "Contents": {
+              sh 'mv target/lecture-0.0.1-SNAPSHOT.jar ./lecture-0.0.1-SNAPSHOT.jar'
+              withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                  s3Download(file: 'configfiles', bucket: 'ebs-oc-prd-contents-bucket', path: 'configfiles/lecture/', force:true)
+                  s3Download(file: 'whatap.agent-2.0_29.jar', bucket: 'ebs-oc-prd-contents-bucket', path: 'whatapfiles/v2/whatap.agent-2.0_29.jar', force:true)
+                  s3Download(file: 'paramkey.txt', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/paramkey.txt', force:true)
+                  s3Download(file: 'CustomPool.x', bucket: 'ebs-oc-stg-contents-bucket', path: 'whatapfiles/v2/CustomPool.x', force:true)
+                  s3Download(file: 'oc-lecture.Dockerfile', bucket: 'ebs-oc-prd-contents-bucket', path: 'dockerfiles/oc-lecture.Dockerfile', force:true)
+                  s3Download(file: 'oc-lecture-k8s.yaml', bucket: 'ebs-oc-prd-contents-bucket', path: 'manifests/v2/oc-lecture-k8s.yaml', force:true)
+                  //s3Download(file: 'oc-lecture-k8s.yaml', bucket: 'ebs-oc-prd-contents-bucket', path: 'manifests/v2/oc-lecture-k8s.yaml', force:true)
+              }
+          }                      
+      )
+    }
+
+    nks2_ns.eachWithIndex() { edu, index ->
+        ns = edu
+        node = 'nks02-npool'  // nks2_node[index]
+        imageName = "oc-lecture-${ns}-$BUILD_NUMBER:release"
+        configName = "${ns}.lecture.yml"
+        
+        if (ns == 'ns-frc') {
+            stage('whatap '+ns) {
+              withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                s3Download(file: 'whatap.conf', bucket: 'ebs-oc-prd-contents-bucket', path: "whatapfiles/v2/nks02/${ns}/whatap.conf", force:true)
+              }
+            }
+    
+            kube = "prd-nks02-kube"
+            kubeUrl = "https://e411dd17-3727-482a-b2cf-5a04b5f10f07.kr.vnks.ntruss.com"
+    
+            stage('deploy '+ns) {
+              sh "docker image build -f oc-lecture.Dockerfile --build-arg SERVER_ENV=prd --build-arg NAMESPACE=${ns} --build-arg CONFIG_NAME=${configName}  -t oc-lecture-${ns}-$BUILD_NUMBER ."
+              sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA l4msm4ug.kr.private-ncr.ntruss.com '
+              sh "docker tag oc-lecture-${ns}-$BUILD_NUMBER l4msm4ug.kr.private-ncr.ntruss.com/" + imageName
+              
+              bfrSize = sh "docker image inspect oc-lecture-${ns}-$BUILD_NUMBER --format '{{.Size}}'"
+              aftSize = 0
+              iter = 0
+              while (bfrSize != aftSize) {
+                      pushImage('docker push l4msm4ug.kr.private-ncr.ntruss.com/' + imageName, 0)
+                      aftSize = sh "docker image inspect l4msm4ug.kr.private-ncr.ntruss.com/$imageName --format '{{.Size}}'"
+                      if(iter++ > 10)
+                          break;
+              }        
+              
+              //kubenetes apply
+              def script = "; envsubst < oc-lecture-k8s.yaml > deployment.yaml"
+              sh "export NAMESPACE=${ns} NODE_NAME=oc-prd-${node} APP_NAME=oc-lecture IMAGE=l4msm4ug.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+              withKubeConfig([credentialsId: "${kube}", serverUrl: "${kubeUrl}",]) 
+              {
+                sh "kubectl apply -f deployment.yaml "
+              }          
+            }    
+        } else {
+            stage('whatap '+ns) {
+              withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                s3Download(file: 'whatap.conf', bucket: 'ebs-oc-prd-contents-bucket', path: "whatapfiles/v2/nks02/${ns}/whatap.conf", force:true)
+              }
+            }
+    
+            kube = "prd-nks02-kube"
+            kubeUrl = "https://e411dd17-3727-482a-b2cf-5a04b5f10f07.kr.vnks.ntruss.com"
+    
+            stage('deploy '+ns) {
+              sh "docker image build -f oc-lecture.Dockerfile --build-arg SERVER_ENV=prd --build-arg NAMESPACE=${ns} --build-arg CONFIG_NAME=${configName}  -t oc-lecture-${ns}-$BUILD_NUMBER ."
+              sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA l4msm4ug.kr.private-ncr.ntruss.com '
+              sh "docker tag oc-lecture-${ns}-$BUILD_NUMBER l4msm4ug.kr.private-ncr.ntruss.com/" + imageName
+                    
+              
+              bfrSize = sh "docker image inspect oc-lecture-${ns}-$BUILD_NUMBER --format '{{.Size}}'"
+              aftSize = 0
+              iter = 0
+              while (bfrSize != aftSize) {
+                      pushImage('docker push l4msm4ug.kr.private-ncr.ntruss.com/' + imageName, 0)
+                      aftSize = sh "docker image inspect l4msm4ug.kr.private-ncr.ntruss.com/$imageName --format '{{.Size}}'"
+                      if(iter++ > 10)
+                          break;
+              }
+                
+              //kubenetes apply
+              def script = "; envsubst < oc-lecture-k8s.yaml > deployment.yaml"
+              sh "export NAMESPACE=${ns} NODE_NAME=oc-prd-${node} APP_NAME=oc-lecture IMAGE=l4msm4ug.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+              withKubeConfig([credentialsId: "${kube}", serverUrl: "${kubeUrl}",]) 
+              {
+                sh "kubectl apply -f deployment.yaml "
+              }          
+            }    
+        }
+    }
+
+    nks1_ns.eachWithIndex() { edu, index ->
+        ns = edu
+        node = 'nks01-npool'  // nks1_node[index]
+        imageName = "oc-lecture-${ns}-$BUILD_NUMBER:release"
+        configName = "${ns}.lecture.yml"
+
+        stage('whatap '+ns) {
+          withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+            s3Download(file: 'whatap.conf', bucket: 'ebs-oc-prd-contents-bucket', path: "whatapfiles/v2/nks01/${ns}/whatap.conf", force:true)
+          }
+        }
+
+        kube = "prd-nks01-kube"
+        kubeUrl = "https://c5e8b325-f5da-42a6-ad63-270f946a2cb8.kr.vnks.ntruss.com"
+
+        stage('deploy '+ns) {
+          sh "docker image build -f oc-lecture.Dockerfile --build-arg SERVER_ENV=prd --build-arg NAMESPACE=${ns} --build-arg CONFIG_NAME=${configName}  -t oc-lecture-${ns}-$BUILD_NUMBER ."
+          sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA l4msm4ug.kr.private-ncr.ntruss.com '
+          sh "docker tag oc-lecture-${ns}-$BUILD_NUMBER l4msm4ug.kr.private-ncr.ntruss.com/" + imageName
+          
+          bfrSize = sh "docker image inspect oc-lecture-${ns}-$BUILD_NUMBER --format '{{.Size}}'"
+          aftSize = 0
+          iter = 0
+          while (bfrSize != aftSize) {
+                  pushImage('docker push l4msm4ug.kr.private-ncr.ntruss.com/' + imageName, 0)
+                  aftSize = sh "docker image inspect l4msm4ug.kr.private-ncr.ntruss.com/$imageName --format '{{.Size}}'"
+                  if(iter++ > 10)
+                      break;
+          }
+          
+          //kubenetes apply
+          def script = "; envsubst < oc-lecture-k8s.yaml > deployment.yaml"
+          sh "export NAMESPACE=${ns} NODE_NAME=oc-prd-${node} APP_NAME=oc-lecture IMAGE=l4msm4ug.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+          withKubeConfig([credentialsId: "${kube}", serverUrl: "${kubeUrl}",]) 
+          {
+            sh "kubectl apply -f deployment.yaml "
+          }          
+        }
+    }
+}
+
+void pushImage(exec, iter){
+    try {
+        sh exec
+    } catch (exception) {
+        if (iter < 10)
+            pushImage(exec, ++iter)
+    }
+}

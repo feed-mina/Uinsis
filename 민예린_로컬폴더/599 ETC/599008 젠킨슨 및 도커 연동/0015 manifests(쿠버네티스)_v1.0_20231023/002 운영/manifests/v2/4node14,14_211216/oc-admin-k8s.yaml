@@ -1,0 +1,135 @@
+# SERVICE
+apiVersion: v1
+kind: Service
+metadata:
+  name: ${APP_NAME}-service
+  namespace: ${NAMESPACE}
+spec:
+  externalTrafficPolicy: Local      # externalTraffic Local
+  type: NodePort
+  selector:                         
+    app: ${APP_NAME}
+  ports:
+  - name: http
+    protocol: TCP
+    port: 58080
+    targetPort: 58080
+                                    
+---
+# DEPOLOYMENT
+apiVersion: apps/v1
+kind: Deployment
+metadata:                           
+  name: ${APP_NAME}
+  namespace: ${NAMESPACE}
+spec:
+  replicas: 1
+  revisionHistoryLimit: 2
+  strategy:
+    type: RollingUpdate            
+    rollingUpdate:                  
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:                         
+    matchLabels:
+      app: ${APP_NAME}
+  template:                          
+    metadata:
+      labels:
+        app: ${APP_NAME}
+    spec:
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                - key: ncloud.com/nks-nodepool
+                  operator: In
+                  values:
+                    - ${NODE_NAME}
+      containers:
+      - name: ${APP_NAME}
+        # command:
+        #   - /bin/entrypoint.sh
+        env:                        # Whatap Agent Env
+        - name: NODE_IP
+          valueFrom: {fieldRef: {fieldPath: status.hostIP}}
+        - name: NODE_NAME
+          valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+        - name: POD_NAME
+          valueFrom: {fieldRef: {fieldPath: metadata.name}}
+        - name: OKIND
+          value: ${APP_NAME}
+        image: ${IMAGE}
+        imagePullPolicy: Always
+        ports:
+        - name: http
+          containerPort: 58080                                       
+        resources:
+          requests:                                                     
+            memory: "2Gi"
+            cpu: "2000m"
+          limits:                                                     
+            memory: "2Gi"
+            cpu: "2000m"
+        startupProbe:         ## *성공 할 때까지 트래픽을 받지 않음(다른 Probe들도 실행하지 않음)
+          httpGet:
+            path: /
+            port: 58080
+            #scheme: HTTPS - Spring Boot App내부에서는 http를 사용함
+          failureThreshold: 30    # probe가 명령 수행 후 실패라고 판단하기 위한 최소 횟수, probe가 횟수 이상 실패하면 컨테이너 중지 후 재시작(default:3)
+        readinessProbe:       ## 실패하면 성공 할 때까지 트래픽을 받지 않음
+          httpGet:
+            path: /
+            port: 58080
+            #scheme: HTTPS - Spring Boot App내부에서는 http를 사용함
+          failureThreshold: 1     # probe가 명령 수행 후 실패라고 판단하기 위한 최소 횟수, probe가 횟수 이상 실패하면 트래픽을 받지 않음(default:3)=>*첫 실패시 곧바로 트래픽차단
+        livenessProbe:        ## 실패하면 컨테이너 중지 후 재시작
+          httpGet:
+            path: /
+            port: 58080
+            #scheme: HTTPS - Spring Boot App내부에서는 http를 사용함
+        lifecycle:                
+          preStop:
+            exec:
+              command: ["sh", "-c", "sleep 20"]             
+      #   volumeMounts:
+      #     - name: start-script-volume
+      #       mountPath: /bin/entrypoint.sh
+      #       readOnly: true
+      #       subPath: entrypoint.sh
+      #     - name: whatap-config-volume
+      #       mountPath: /whatap
+      # volumes:
+      # - name: start-script-volume
+      #   configMap:
+      #     defaultMode: 0700
+      #     name: whatap-script
+      # - name: whatap-config-volume
+      #   emptyDir: {}
+      imagePullSecrets:
+      - name: regcred-${NAMESPACE}
+
+---
+#HPA      
+apiVersion: autoscaling/v2beta1
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ${APP_NAME}-hpa
+  namespace: ${NAMESPACE}
+spec:
+  maxReplicas: 1
+  minReplicas: 1
+  scaleTargetRef:                      
+    apiVersion: apps/v1          
+    kind: Deployment                  
+    name: ${APP_NAME}
+  metrics:
+  - type: Resource
+    resource:
+      name: cpu
+      targetAverageUtilization: 60
+  - type: Resource
+    resource:
+      name: memory
+      targetAverageUtilization: 60      

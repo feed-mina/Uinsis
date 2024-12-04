@@ -1,0 +1,27 @@
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  annotations:
+    alb.ingress.kubernetes.io/description: oc-prd-nks01-auth ingress controller
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}]'
+    alb.ingress.kubernetes.io/load-balancer-size: large
+    kubernetes.io/ingress.class: alb
+  labels:
+    app: auth-alb-ingress
+  name: auth-alb-ingress
+  namespace: ns-auth
+spec:
+  backend:
+    serviceName: oc-auth-service
+    servicePort: 18080
+  rules:
+  - http:
+      paths:
+      - backend:
+          serviceName: oc-auth-service
+          servicePort: 18080
+        path: /auth/*
+      - backend:
+          serviceName: oc-frontmain-service
+          servicePort: 10080
+        path: /*

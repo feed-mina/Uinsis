@@ -1,0 +1,9 @@
+FROM openjdk:8-jdk-alpine
+ARG SERVER_ENV
+ENV SERVER_ENV ${SERVER_ENV}
+ENV JAVA_OPTS="-Xmx1g -Xms1g"
+COPY ./oc-admin-0.0.1-SNAPSHOT.jar oc-admin.jar
+
+# Timezone
+RUN apk --no-cache add tzdata && cp /usr/share/zoneinfo/Asia/Seoul /etc/localtime && echo "Asia/Seoul" > /etc/timezone
+ENTRYPOINT exec java $JAVA_OPTS -Dspring.profiles.active=${SERVER_ENV} -jar /oc-admin.jar

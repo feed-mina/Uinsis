@@ -1,0 +1,85 @@
+------------------------
+체크 - 이 빌드는 매개변수가 있습니다.
+String parameter
+매개변수명: BRANCH_NAME
+Default Value: release
+
+pipeline
+definition: pipeline script
+script
+체크 - use groovy sandbox
+------------------------
+
+
+node{
+    def mvnHome
+    def artifactId
+    def version
+    def jar
+    def imageName
+    def ns
+    def kube
+    def kubeUrl
+
+    stage('checkparam') {
+        if ("$BRANCH_NAME" == "master") {
+        } else {
+            echo "branch name must be 'master'"
+            exit
+        }
+    }
+    
+    stage('checkout'){
+        checkout([$class: 'GitSCM', branches: [[name: "*/$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/ui-develop/lx-player.git']]])
+    }
+    stage('Initialize') {
+        mvnHome = tool 'M3'
+    }
+    stage('archieve') {
+        parallel(
+            "Docker ImagePush": {
+                withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                    s3Download(file: 'lx-player.Dockerfile', bucket: 'ebs-oc-prd-contents-bucket', path: 'dockerfiles/lx-player.Dockerfile', force:true)
+                    s3Download(file: 'lx-player-k8s.yaml', bucket: 'ebs-oc-prd-contents-bucket', path: 'manifests/v2/lx-player-k8s.yaml', force:true)
+                    s3Download(file: 'nginx-player.conf', bucket: 'ebs-oc-prd-contents-bucket', path: "nginxconf/ns-auth/nginx-player.conf", force:true)
+                }
+                // sh 'docker image build -f oc-auth.Dockerfile --build-arg SERVER_ENV=prd -t app .'
+                // sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA l4msm4ug.kr.private-ncr.ntruss.com'
+                // sh 'docker tag app l4msm4ug.kr.private-ncr.ntruss.com/' + imageName
+                // sh 'docker push l4msm4ug.kr.private-ncr.ntruss.com/' + imageName
+            }
+        )
+    }
+
+    stage('kube NKS02') {
+      kube = "prd-nks02-kube"
+      kubeUrl = "https://e411dd17-3727-482a-b2cf-5a04b5f10f07.kr.vnks.ntruss.com"
+      def script = "; envsubst < lx-player-k8s.yaml > deployment.yaml"
+      imageName = "lx-player-nks02-$BUILD_NUMBER:release"
+      
+      sh "docker image build -f lx-player.Dockerfile -t lx-player-nks02-$BUILD_NUMBER ."
+      sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA l4msm4ug.kr.private-ncr.ntruss.com'
+      sh "docker tag lx-player-nks02-$BUILD_NUMBER l4msm4ug.kr.private-ncr.ntruss.com/" + imageName
+      sh 'docker push l4msm4ug.kr.private-ncr.ntruss.com/' + imageName
+      sh "export NODE_NAME=oc-prd-nks02-nauth NAMESPACE=ns-auth APP_NAME=lx-player IMAGE=l4msm4ug.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+      withKubeConfig([credentialsId: "${kube}", serverUrl: "${kubeUrl}", ]) {
+        sh "kubectl apply -f deployment.yaml"
+      }
+    }
+
+    stage('kube NKS01') {
+      kube = "prd-nks01-kube"
+      kubeUrl = "https://c5e8b325-f5da-42a6-ad63-270f946a2cb8.kr.vnks.ntruss.com"
+      def script = "; envsubst < lx-player-k8s.yaml > deployment.yaml"
+      imageName = "lx-player-nks01-$BUILD_NUMBER:release"
+      
+      sh "docker image build -f lx-player.Dockerfile -t lx-player-nks01-$BUILD_NUMBER ."
+      sh 'docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA l4msm4ug.kr.private-ncr.ntruss.com'
+      sh "docker tag lx-player-nks01-$BUILD_NUMBER l4msm4ug.kr.private-ncr.ntruss.com/" + imageName
+      sh 'docker push l4msm4ug.kr.private-ncr.ntruss.com/' + imageName
+      sh "export NODE_NAME=oc-prd-nks01-nauth NAMESPACE=ns-auth APP_NAME=lx-player IMAGE=l4msm4ug.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+      withKubeConfig([credentialsId: "${kube}", serverUrl: "${kubeUrl}", ]) {
+        sh "kubectl apply -f deployment.yaml"
+      }
+    }
+}

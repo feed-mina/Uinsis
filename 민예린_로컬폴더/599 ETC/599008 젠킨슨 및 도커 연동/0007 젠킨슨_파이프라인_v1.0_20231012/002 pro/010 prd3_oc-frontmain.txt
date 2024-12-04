@@ -1,0 +1,114 @@
+------------------------
+체크 - 이 빌드는 매개변수가 있습니다.
+String parameter
+매개변수명: BRANCH_NAME
+Default Value: release
+
+pipeline
+definition: pipeline script
+script
+체크 - use groovy sandbox
+------------------------
+
+node{
+    def imageName
+    def bfrSize
+    def aftSize = 0
+	def iter = 0
+	def configEnv = "prd"
+    def staticDir = "oc_main"
+    
+    def nks01_ns = ["ns-auth"]
+    def nks01_node = ["nks01-nauth"]	//["nks01-np"]
+    
+    def nks02_ns = ["ns-auth"]
+    def nks02_node = ["nks02-nauth"]	//["nks02-np"]
+    def app_name = "oc-frontmain"
+    
+    
+    stage('checkout'){
+        checkout([$class: 'GitSCM', branches: [[name: "*/$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/root1/oc-main.git']]])
+    }
+
+    stage('initialize'){
+        imageName = "oc-${configEnv}-frontmain-$BUILD_NUMBER:release"
+    }
+    stage('config') {
+        parallel(
+            "config pull": {
+                withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+                    // s3Download(file: 'front.Dockerfile', bucket: "ebs-oc-${configEnv}-contents-bucket", path: 'dockerfiles/front-static.Dockerfile', force:true)
+                    
+                    // copy htm
+                    s3Download(file: 'front.Dockerfile', bucket: "ebs-oc-${configEnv}-contents-bucket", path: 'dockerfiles/front-htm.Dockerfile', force:true)
+                    s3Download(file: 'oc-front-k8s.yaml', bucket: "ebs-oc-${configEnv}-contents-bucket", path: 'manifests/v2/oc-frontmain-k8s.yaml', force:true)
+                    s3Download(file: 'nginx.conf', bucket: "ebs-oc-${configEnv}-contents-bucket", path: "nginxconf/nginx-auth.conf", force:true)
+                }
+            }
+        )
+    }
+
+    stage('npm build') {
+        nodejs(nodeJSInstallationName: 'nodejs') {
+            // sh "rm -rf package-lock.json node_modules"
+            sh "npm install"
+            sh "cp environments/config.${configEnv}.js environments/config.js"
+            sh "npm run build"
+        }
+    }
+    
+    stage('upload static files') {
+        withAWS(region: 'kr-standard', credentials: "oc-${configEnv}-upload", endpointUrl: 'https://kr.object.ncloudstorage.com') {
+            // s3Upload(file:"dist" ,bucket: "oc-${configEnv}-static-bucket", path: "${staticDir}/", force:true)
+            
+            // Exclude *.html
+            s3Upload(workingDir:"dist" ,bucket: "oc-${configEnv}-static-bucket", path: "${staticDir}/", includePathPattern: "**/*" , excludePathPattern: "**/*.html", force:true)
+        }
+    }
+    
+    stage('image build') {
+        sh "docker image build -f front.Dockerfile  -t ${imageName} ."
+        sh "docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA l4msm4ug.kr.private-ncr.ntruss.com "
+        sh "docker tag ${imageName} l4msm4ug.kr.private-ncr.ntruss.com/" + imageName
+        
+        
+        bfrSize = sh "docker image inspect ${imageName} --format '{{.Size}}'"
+		aftSize = 0
+		iter = 0
+		while (bfrSize != aftSize) {
+              pushImage("docker push l4msm4ug.kr.private-ncr.ntruss.com/" + imageName, 0)
+              aftSize = sh "docker image inspect l4msm4ug.kr.private-ncr.ntruss.com/$imageName --format '{{.Size}}'"
+              if(iter++ > 10)
+                  break;
+        }
+    }
+    
+    stage('NKS02') {
+        withKubeConfig([credentialsId: "${configEnv}-nks02-kube", serverUrl: "$PRD_NKS02_URL"]) {
+            apply_from_ns(nks02_ns, nks02_node, app_name, imageName, configEnv)
+        }
+    }
+
+    stage('NKS01') {
+        withKubeConfig([credentialsId: "${configEnv}-nks01-kube", serverUrl: "$PRD_NKS01_URL"]) {
+            apply_from_ns(nks01_ns, nks01_node, app_name, imageName, configEnv)
+        }
+    }
+}
+
+void pushImage(exec, iter){
+    try {
+        sh exec
+    } catch (exception) {
+        if (iter < 10)
+            pushImage(exec, ++iter)
+    }
+}
+
+def apply_from_ns(ns, node, appName, imageName, env) {
+    ns.eachWithIndex() { namespace, index ->
+        sh "export NAMESPACE=${namespace} NODE_NAME=oc-${env}-${node[index]} APP_NAME=${appName} IMAGE=l4msm4ug.kr.private-ncr.ntruss.com/$imageName ; envsubst < oc-front-k8s.yaml > ${appName}-${namespace}.yaml"
+        // sh "cat ${appName}-${namespace}.yaml"
+        sh "kubectl apply -f ${appName}-${namespace}.yaml"
+    }
+}

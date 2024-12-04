@@ -1,0 +1,98 @@
+--------------------------------------------
+옵션
+체크 - 오래된 빌드 삭제
+Strategy - Log Rotation
+빌드 이력유지기간(일): 공란
+보관할 최대갯수: 3
+ 
+String Parameter
+> 매개변수명 : BRANCH_NAME
+> Default value develop
+> 설명없음
+
+pipeline
+> Definition: pipeline script
+> Script
+> 체크: use groovy sandbox
+
+--------------------------------------------
+
+node {
+    
+    def appName = "oc-edu"
+    def env = "stg"
+    
+    def nks01_ns = ["inc1", "inc2"]
+    // def nks01_node = ["edu01", "edu02"]
+    
+    def nks02_ns = ["taj", "pus"]
+    // def nks02_node = ["edu03", "edu04"]
+    
+    stage('checkout') {
+        checkout([$class: 'GitSCM', branches: [[name: "$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/online-class-admin/api/edu.git']]])
+    }
+    
+    stage('Initialize') {
+        mvnHome = tool 'M3'
+    }
+    
+    stage('build artifacts') {
+        sh "'${mvnHome}/bin/mvn' -DskipTests clean package -DfinalName=oc-edu"
+    }
+    
+    stage('move artifacts') {
+        sh "mv target/oc-edu-0.0.1-SNAPSHOT.jar ./oc-edu-0.0.1-SNAPSHOT.jar"
+    }
+    
+    
+    stage("docker build") {
+        docker_build(nks01_ns, env, appName)
+        docker_build(nks02_ns, env, appName)
+    }
+    
+    stage('kube deploy') {
+        withKubeConfig([credentialsId: "stg-nks01-kube", serverUrl: "$STG_NKS01_URL"]){
+            kube_deploy(nks01_ns, env)
+            kube_deploy(nks02_ns, env)
+        }
+    }
+}
+
+
+def docker_build(ns, env, appName) {
+    ns.eachWithIndex() { name, index ->
+        // def namespace = "ns-"+name
+        def db = "${env}_db_"+name
+        def imageName = "oc-${env}-edu-${name}-$BUILD_NUMBER:release"
+        
+        withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+            s3Download(file: "${appName}.Dockerfile", bucket: "ebs-oc-${env}-contents-bucket", path: "dockerfiles/${appName}.Dockerfile", force:true)
+        }
+        
+        sh "docker image build -f ${appName}.Dockerfile --build-arg SERVER_ENV=${env},${db} -t ${imageName} ."
+        sh "docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA e89969vf.kr.private-ncr.ntruss.com"
+        sh "docker tag ${imageName} e89969vf.kr.private-ncr.ntruss.com/" + imageName
+        sh "docker push e89969vf.kr.private-ncr.ntruss.com/$imageName"
+        
+    }
+}
+
+def kube_deploy(ns, env) {
+    // download manifests
+    withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+        s3Download(file: "oc-edu-k8s.yaml", bucket: "ebs-oc-${env}-contents-bucket", path: "manifests/v2/oc-edu-k8s.yaml", force:true)
+    }
+    
+    // deploy each namespace
+    ns.eachWithIndex() { name, index -> 
+        def namespace = "ns-admin"
+        def appName = "oc-edu-"+name
+        def imageName = "oc-${env}-edu-${name}-$BUILD_NUMBER:release"
+    
+        def script = "; envsubst < oc-edu-k8s.yaml > deployment-${name}.yaml"
+        sh "export NAMESPACE=${namespace} NODE_NAME=oc-${env}-nks01-np APP_NAME=${appName} IMAGE=e89969vf.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+        
+        // deploy
+        sh "kubectl apply -f deployment-${name}.yaml "
+    }
+}

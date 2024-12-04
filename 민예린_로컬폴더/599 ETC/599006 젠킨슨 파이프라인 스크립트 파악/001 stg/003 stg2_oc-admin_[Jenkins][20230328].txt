@@ -1,0 +1,81 @@
+--------------------------------------------
+옵션
+체크 - 오래된 빌드 삭제
+Strategy - Log Rotation
+빌드 이력유지기간(일): 공란
+보관할 최대갯수: 3
+ 
+String Parameter
+> 매개변수명 : BRANCH_NAME
+> Default value develop
+> 설명없음
+
+pipeline
+> Definition: pipeline script
+> Script
+> 체크: use groovy sandbox
+
+--------------------------------------------
+node {
+    
+    def appName = "oc-admin"
+    def env = "stg"
+    def nodeName = "oc-stg-nks01-np"
+    def branch = "$BRANCH_NAME"
+    
+    /*
+    stage('checkparam') {
+        if ("$BRANCH_NAME" == "sicc-develop") {
+        } else {
+            echo "branch name must be 'sicc-develop'"
+            exit
+        }
+    }
+
+    stage('runcheck') {
+        input 'OK?'
+    }
+    */
+
+    stage('checkout') {
+        checkout([$class: 'GitSCM', branches: [[name: "$BRANCH_NAME"]], doGenerateSubmoduleConfigurations: false, extensions: [], submoduleCfg: [], userRemoteConfigs: [[credentialsId: '68ac590f-b634-41c6-8888-1f19d529a812', url: 'http://172.24.3.9:8001/online-class-admin/main.git']]])
+    }
+    
+    stage('Initialize') {
+        mvnHome = tool 'M3'
+        imageName = "oc-${env}-admin-$BUILD_NUMBER:release"
+        echo imageName
+    }
+    
+    stage('build artifacts') {
+        sh "'${mvnHome}/bin/mvn' install:install-file -Dfile=/jenkins/jenkins/workspace/oc-${env}-admin-main/lib/ebs/groove-rightaccess-agent/groove-rightaccess-agent-1.0.35-RELEASE.jar -DgroupId=ebs -DartifactId=groove-rightaccess-agent -Dversion=1.0.35-RELEASE -Dpackaging=jar"
+        sh "'${mvnHome}/bin/mvn' -DskipTests clean package -DfinalName=oc-admin"
+    }
+    
+    stage('move artifacts') {
+        sh "mv target/oc-admin-0.0.1-SNAPSHOT.jar ./oc-admin-0.0.1-SNAPSHOT.jar"
+    }
+    
+    stage('build image') {
+        withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+            s3Download(file: "${appName}.Dockerfile", bucket: "ebs-oc-${env}-contents-bucket", path: "dockerfiles/${appName}.Dockerfile", force:true)
+        }
+        sh "docker image build -f ${appName}.Dockerfile --build-arg SERVER_ENV=${env} -t ${imageName} ."
+        //sh "docker image build -f ${appName}.Dockerfile --build-arg SERVER_ENV=${env} -t ${imageName} . --network host"
+        sh "docker login -u RQKEKsV39a7yQVy17bd3 -p yesG7Hu5jlWSuV7fBHhvpl13UVg5wlKfpUdP2muA e89969vf.kr.private-ncr.ntruss.com"
+        sh "docker tag ${imageName} e89969vf.kr.private-ncr.ntruss.com/" + imageName
+        sh "docker push e89969vf.kr.private-ncr.ntruss.com/$imageName"
+    }
+    
+    stage('kube deploy') {
+        withAWS(region: 'kr-standard', credentials: 'ncp-credentials', endpointUrl: 'https://kr.object.ncloudstorage.com') {
+            s3Download(file: "${appName}-k8s.yaml", bucket: "ebs-oc-${env}-contents-bucket", path: "manifests/v2/${appName}-k8s.yaml", force:true)
+        }
+        def script = "; envsubst < ${appName}-k8s.yaml > deployment.yaml"
+        sh "export NODE_NAME=${nodeName} NAMESPACE=ns-admin APP_NAME=${appName} IMAGE=e89969vf.kr.private-ncr.ntruss.com/" + imageName + ' ' + script
+        withKubeConfig([credentialsId: "stg-nks01-kube", serverUrl: "$STG_NKS01_URL"]){
+            sh "kubectl apply -f deployment.yaml "
+        }
+    }
+}
+
