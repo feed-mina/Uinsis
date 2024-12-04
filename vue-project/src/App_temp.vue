@@ -15,23 +15,6 @@ import TreeItem from '@/TreeItem.vue';
 import Modal from '@/Modal.vue'; 
 
 export default{
-  // data()에서 반환된 속성들은 반응적인 상태가 되어 this에 노출된다.
-  data(){
-    return{
-      count : 0
-    }
-  },
-  // method는 속성값을 변경하고 업데이트 할 수 있는 함수, 템플릿 내에서 이벤트 헨들러로 바인딩 될 수 있음
-  methods:{
-    increment(){
-      this.count++
-    }
-  },
-  // 셍명주기 훅은 컴포넌트 생명주기의 여러단계에서 호출딘다. 이 함수는 컴포넌트가 마운트 된 후 호출된다.
-  mounted(){
-    console.log(`숫자 세기의 초기값은 ${this.count} 이다`)
-  },
-
   components :{
     ComponentA,
     ComponentB,
@@ -280,7 +263,6 @@ return {
   <header>
     <img alt="Vue logo" class="logo" src="@/assets/logo.svg" width="125" height="125" />
 
-  <button @click="increment">숫자 세기: {{ count }}</button>
     <div class="wrapper">
       <HelloWorld msg="You did it!" />
 
